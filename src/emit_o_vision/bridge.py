@@ -1,50 +1,69 @@
-"""Python bridge: captures the webcam and streams grayscale frames to the Forth renderer.
+"""CLI runner for EMIT-O-VISION Forth pipeline.
 
-Protocol on the renderer's stdin (see emit_o_vision.fs):
-    header: width, height as two unsigned 16-bit little-endian integers
-    frames: width * height bytes per frame (gray values 0..255, row-major)
+Supports live webcams, video files, and static images.
+Can output directly to the terminal or save rendered ASCII frames into a text file.
 """
 
+from __future__ import annotations
+
 import argparse
-import shutil
-import struct
-import subprocess
 import sys
+import time
 from pathlib import Path
+from typing import Optional
 
 import cv2
 
-FORTH_SCRIPT = Path(__file__).with_name("emit_o_vision.fs")
+from emit_o_vision.renderer import FORTH_SCRIPT, ForthRenderer, find_gforth
+from emit_o_vision.sources import ImageSource, VideoSource, WebcamSource, open_media_file
 
-# Typical install locations of the Gforth Windows installer
-GFORTH_FALLBACKS = (
-    Path(r"C:\Program Files (x86)\gforth\gforth.exe"),
-    Path(r"C:\Program Files\gforth\gforth.exe"),
-)
-
-# Terminal characters are roughly twice as tall as wide
 CHAR_ASPECT = 0.55
-
-
-def find_gforth(explicit: str | None) -> str | None:
-    if explicit:
-        return explicit
-    found = shutil.which("gforth")
-    if found:
-        return found
-    for candidate in GFORTH_FALLBACKS:
-        if candidate.is_file():
-            return str(candidate)
-    return None
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Webcam als ASCII-Grafik im Terminal, gerendert von Forth."
+        description="EMIT-O-VISION: Live-Webcam, Video- und Bildverarbeitung gerendert mit Forth."
     )
-    parser.add_argument("--width", type=int, default=100, help="Breite in Zeichen (Standard: 100)")
-    parser.add_argument("--camera", type=int, default=0, help="Kamera-Index (Standard: 0)")
-    parser.add_argument("--gforth", help="Pfad zu gforth (Standard: PATH bzw. Installationsordner)")
+    parser.add_argument(
+        "--input",
+        "-i",
+        help="Pfad zu einer Bild- oder Videodatei (optional; Standard: Webcam)",
+    )
+    parser.add_argument(
+        "--camera",
+        "-c",
+        type=int,
+        default=0,
+        help="Kamera-Index (Standard: 0)",
+    )
+    parser.add_argument(
+        "--width",
+        "-w",
+        type=int,
+        default=100,
+        help="Breite in Zeichen (Standard: 100)",
+    )
+    parser.add_argument(
+        "--height",
+        type=int,
+        default=None,
+        help="Optionale Höhe in Zeichen (Standard: automatisch berechnet)",
+    )
+    parser.add_argument(
+        "--output",
+        "-o",
+        help="Pfad zu einer Textdatei zum Speichern des ASCII-Outputs (optional)",
+    )
+    parser.add_argument(
+        "--fps",
+        type=float,
+        default=None,
+        help="Bildrate begrenzen (Standard: Original-FPS der Quelle)",
+    )
+    parser.add_argument(
+        "--gforth",
+        help="Pfad zum Gforth-Executable (Standard: automatische Suche)",
+    )
     return parser.parse_args()
 
 
@@ -52,53 +71,124 @@ def main() -> int:
     args = parse_args()
 
     gforth = find_gforth(args.gforth)
-    if gforth is None:
-        print("Fehler: gforth nicht gefunden. Bitte installieren oder mit --gforth angeben.")
+    if not gforth:
+        print("Fehler: Gforth wurde nicht gefunden. Bitte installieren oder mit --gforth angeben.")
         return 1
 
-    cap = cv2.VideoCapture(args.camera)
-    if not cap.isOpened():
-        print(f"Fehler: Konnte die Webcam {args.camera} nicht öffnen.")
-        return 1
+    # Determine frame source
+    if args.input:
+        source_path = Path(args.input)
+        if not source_path.is_file():
+            print(f"Fehler: Datei nicht gefunden: {source_path}")
+            return 1
+        source = open_media_file(source_path, loop_video=False if args.output else True)
+        if not source:
+            print(f"Fehler: Nicht unterstütztes Format oder Datei konnte nicht geöffnet werden: {source_path}")
+            return 1
+    else:
+        source = WebcamSource(camera_index=args.camera)
+        if not source.is_opened:
+            print(f"Fehler: Konnte Webcam mit Index {args.camera} nicht öffnen.")
+            return 1
 
-    ok, frame = cap.read()
-    if not ok:
-        print("Fehler beim Lesen des Kamera-Frames.")
-        cap.release()
-        return 1
+    target_fps = args.fps if args.fps is not None else source.fps
+    frame_delay = 1.0 / max(1.0, target_fps) if target_fps > 0 else 0.0
 
-    cam_height, cam_width = frame.shape[:2]
-    width = args.width
-    height = max(1, int(width * cam_height / cam_width * CHAR_ASPECT))
+    print(f"Quelle: {source.name} | Gforth: {gforth}")
+    print(f"ASCII-Auflösung: {args.width} Spalten | FPS: {target_fps:.1f}")
 
-    # Relative script path + cwd avoids Windows-path issues in the Cygwin-based Gforth
-    renderer = subprocess.Popen(
-        [gforth, FORTH_SCRIPT.name], stdin=subprocess.PIPE, cwd=FORTH_SCRIPT.parent
+    # Mode 1: Write clean ASCII to output text file
+    if args.output:
+        out_path = Path(args.output).resolve()
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        print(f"Schreibe ASCII-Ausgabe in Datei: {out_path}")
+
+        renderer = ForthRenderer(gforth_path=gforth)
+        frame_count = 0
+        try:
+            with open(out_path, "w", encoding="utf-8") as f:
+                while True:
+                    ok, frame = source.read()
+                    if not ok or frame is None:
+                        break
+
+                    h, w = frame.shape[:2]
+                    calc_h = args.height or max(1, int(args.width * (h / w) * CHAR_ASPECT))
+                    renderer.send_frame(frame, width=args.width, height=calc_h)
+                    rendered = renderer.get_latest_frame(timeout=2.0)
+                    if rendered:
+                        if frame_count > 0:
+                            f.write("\n\x0c\n")  # Page break between frames
+                        f.write(rendered)
+                        frame_count += 1
+
+                    if isinstance(source, ImageSource):
+                        break
+        finally:
+            renderer.close()
+            source.release()
+
+        print(f"Fertig: {frame_count} Frame(s) in {out_path} gespeichert.")
+        return 0
+
+    # Mode 2: Real-time rendering directly to Terminal (stdout)
+    # Using ForthRenderer to safely stream
+    import subprocess
+    import struct
+
+    renderer_proc = subprocess.Popen(
+        [gforth, FORTH_SCRIPT.name],
+        stdin=subprocess.PIPE,
+        cwd=FORTH_SCRIPT.parent,
     )
 
     try:
-        renderer.stdin.write(struct.pack("<HH", width, height))
-        while ok:
+        while True:
+            t0 = time.perf_counter()
+            ok, frame = source.read()
+            if not ok or frame is None:
+                if isinstance(source, ImageSource):
+                    # Keep image displayed until user interrupts
+                    time.sleep(0.1)
+                    continue
+                break
+
+            h, w = frame.shape[:2]
+            calc_h = args.height or max(1, int(args.width * (h / w) * CHAR_ASPECT))
+
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            renderer.stdin.write(cv2.resize(gray, (width, height)).tobytes())
-            renderer.stdin.flush()
-            ok, frame = cap.read()
+            resized = cv2.resize(gray, (args.width, calc_h), interpolation=cv2.INTER_AREA)
+
+            header = struct.pack("<HH", args.width, calc_h)
+            renderer_proc.stdin.write(header + resized.tobytes())
+            renderer_proc.stdin.flush()
+
+            if isinstance(source, ImageSource):
+                # Static image: render once and wait
+                time.sleep(0.2)
+                continue
+
+            dt = time.perf_counter() - t0
+            sleep_time = frame_delay - dt
+            if sleep_time > 0:
+                time.sleep(sleep_time)
+
     except (KeyboardInterrupt, BrokenPipeError):
         pass
     finally:
-        cap.release()
+        source.release()
+        if renderer_proc.stdin:
+            try:
+                renderer_proc.stdin.close()
+            except OSError:
+                pass
         try:
-            renderer.stdin.close()
-        except OSError:
-            pass
-        try:
-            renderer.wait(timeout=2)
+            renderer_proc.wait(timeout=1.5)
         except subprocess.TimeoutExpired:
-            renderer.kill()
+            renderer_proc.kill()
 
     return 0
 
 
 if __name__ == "__main__":
     sys.exit(main())
-

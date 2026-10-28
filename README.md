@@ -1,9 +1,22 @@
 # EMIT-O-VISION
 
-**EMIT-O-VISION** gibt einen Live-Webcam-Feed als ASCII-Grafik direkt im Terminal wieder. Ein Python-Zwischenskript liest die Kamerabilder aus und reicht sie als Graustufen-Bytes an ein **Forth**-Programm weiter. Das Forth-Programm wandelt jeden Pixel in ein Zeichen um und gibt es mit `EMIT` aus.
+**EMIT-O-VISION** wandelt Live-Webcam-Feeds, Videos und hochauflösende Bilder in Echtzeit in dynamische ASCII-Grafik um. Die Bildverarbeitung und Zeichenausgabe per `EMIT` erfolgen dabei direkt in **Forth** (Gforth), während Python als Brücke zur Kamera- und Datei-Erfassung dient.
 
-> [!NOTE]
-> **Projektstatus:** Frühe Entwicklungsphase. Die Forth-Pipeline (`emit-o-vision-forth`) funktioniert. Daneben gibt es den ursprünglichen Python-Prototyp (`emit-o-vision`), der das Bild komplett in Python und farbig ausgibt.
+Das Projekt bietet sowohl eine grafische **Vollbild-Studio-App (PySide6)** als auch flexible **Kommandozeilen-Tools**.
+
+---
+
+## Funktionen
+
+- **Echte Forth-Render-Engine ([`emit_o_vision.fs`](src/emit_o_vision/emit_o_vision.fs)):** Liest Graustufen-Bytes über eine Stream-Pipe ein, ordnet jedem Helligkeitswert ein Zeichen zu und rendert blitzschnell per `EMIT`.
+- **EMIT-O-VISION Studio (GUI):**
+  - Startet standardmäßig direkt im **Vollbildmodus**, umschaltbar in den **Fenstermodus** (per Button, `F11` oder `Esc`).
+  - **Kopfleiste:** Kamera ein-/ausschalten, Bild- und Videodateien per Dateidialog oder **Drag & Drop** laden, Pause/Weiter, Geschwindigkeitsregler (Normal/Max), Schriftgröße anpassen (`A −` / `A +`) und Schnappschüsse direkt als `.txt`-Datei exportieren.
+  - **Dynamische Auflösung:** Die Zeichenauflösung passt sich automatisch der Bildschirmgröße und Schriftgröße an.
+- **Kommandozeilen-Pipeline ([`bridge.py`](src/emit_o_vision/bridge.py)):**
+  - Live-Webcam im Terminal (`emit-o-vision-forth`).
+  - Verarbeitung beliebiger Bild- und Videodateien (`--input`).
+  - Export von ASCII-Frames in reine Textdateien (`--output datei.txt`).
 
 ---
 
@@ -11,37 +24,30 @@
 
 ```mermaid
 flowchart LR
-    A["Webcam"] -->|Rohbild| B["bridge.py (OpenCV)"]
-    B -->|"Graustufen-Bytes über stdin"| C["emit_o_vision.fs (Gforth)"]
-    C -->|"Zeichenausgabe per EMIT"| D["Terminal"]
+    A["Kamera / Bild / Video"] -->|Roh-Frames| B["Python-Bridge / GUI"]
+    B -->|"Graustufen-Bytes (Header + Pixel) via stdin"| C["emit_o_vision.fs (Gforth)"]
+    C -->|"ASCII-Stream via EMIT & Form Feed"| D["Terminal / Vollbild-Canvas"]
 ```
 
-1. **Erfassung ([`bridge.py`](src/emit_o_vision/bridge.py)):** Liest die Kamerabilder mit OpenCV, rechnet sie auf Terminalgröße herunter, wandelt sie in Graustufen (0–255) um und schreibt sie in die Standardeingabe des Forth-Prozesses. Gforth startet das Skript selbst als Unterprozess.
-2. **Darstellung ([`emit_o_vision.fs`](src/emit_o_vision/emit_o_vision.fs)):** Liest die Bilder Byte für Byte ein, ordnet jedem Grauwert ein Zeichen der Helligkeitsskala `.:-=+*#%@` zu und gibt es per `EMIT` aus. Vor jedem Bild setzt es den Cursor mit ANSI-Codes zurück an den Anfang.
+### Datenformat (Stream-Protokoll)
 
-### Datenformat
+Jeder Frame wird im Binärformat an Gforth übergeben:
 
 | Abschnitt | Inhalt |
 | --- | --- |
-| Header (einmalig, 4 Bytes) | Breite und Höhe als vorzeichenlose 16-Bit-Zahlen, Little Endian |
-| Frames (fortlaufend) | `Breite × Höhe` Bytes pro Bild, ein Grauwert pro Pixel, zeilenweise |
+| Header (pro Frame, 4 Bytes) | Breite (`u16`) und Höhe (`u16`) als Little-Endian-Ganzzahlen |
+| Pixel-Daten | `Breite × Höhe` Bytes (Grauwerte 0–255, zeilenweise) |
 
-Wenn der Datenstrom endet, blendet das Forth-Programm den Cursor wieder ein und beendet sich.
-
-> [!NOTE]
-> Python startet Gforth direkt als Unterprozess, statt eine Shell-Pipe (`python … | gforth …`) zu verwenden. Windows PowerShell 5 behandelt Pipes zwischen Programmen als Text und würde die Binärdaten verfälschen.
+Am Ende jedes gerenderten Bildes gibt Forth ein `Form Feed`-Zeichen (`ASCII 12`) aus. Dadurch können sowohl die GUI als auch Dateiexporter einzelne Frames verlässlich voneinander trennen.
 
 ---
 
 ## Voraussetzungen
 
 - **Python 3.14** oder neuer (laut `pyproject.toml` bzw. `.python-version`)
-- **[uv](https://docs.astral.sh/uv/)** für Umgebung und Abhängigkeiten
-- **opencv-python** (wird über `uv` automatisch installiert)
-- **[Gforth](https://gforth.org/)**: Getestet mit Gforth 0.7.0 unter Windows. Downloads und Installationsanleitungen gibt es auf der Gforth-Website, unter Debian/Ubuntu geht auch `sudo apt install gforth`, unter macOS `brew install gforth`. Linux und macOS wurden bisher nicht getestet.
-- **Ein Terminal mit ANSI-Unterstützung**, z. B. Windows Terminal, und eine Schrift mit fester Zeichenbreite. Für den farbigen Python-Prototyp braucht das Terminal zusätzlich TrueColor-Unterstützung.
-
-Das Skript sucht `gforth` zuerst im `PATH` und danach in den Standard-Installationsordnern unter Windows (`C:\Program Files (x86)\gforth\` und `C:\Program Files\gforth\`). Liegt Gforth woanders, gib den Pfad mit `--gforth` an.
+- **[uv](https://docs.astral.sh/uv/)** für Umgebung und Paketverwaltung
+- **opencv-python** und **PySide6** (werden über `uv` automatisch installiert)
+- **[Gforth](https://gforth.org/)**: Getestet mit Gforth 0.7.0 unter Windows (Standardpfad `C:\Program Files (x86)\gforth`). Wird automatisch im `PATH` und den Standardinstallationspfaden gefunden.
 
 ---
 
@@ -57,35 +63,66 @@ uv sync
 
 ## Verwendung
 
-### Forth-Pipeline
+### 1. Grafische Benutzeroberfläche (Studio)
+
+Startet die App direkt im Vollbild:
+
+```bash
+uv run emit-o-vision-studio
+```
+
+#### Tastenkürzel in der GUI
+
+- `F11`: Vollbild / Fenstermodus umschalten
+- `Esc`: Vollbild verlassen
+- `Leertaste`: Wiedergabe pausieren / fortsetzen
+- **Drag & Drop:** Beliebige Bilddatei (`.png`, `.jpg`, `.webp` etc.) oder Videodatei (`.mp4`, `.avi`, `.mkv` etc.) einfach ins Fenster ziehen.
+
+---
+
+### 2. Kommandozeile (Forth-Pipeline)
+
+#### Live-Webcam im Terminal
 
 ```bash
 uv run emit-o-vision-forth
 ```
 
-Optionen:
-
-| Option | Bedeutung | Standard |
-| --- | --- | --- |
-| `--width` | Breite des Bildes in Zeichen | `100` |
-| `--camera` | Kamera-Index | `0` |
-| `--gforth` | Pfad zu `gforth` | automatische Suche |
-
-Beispiel:
+#### Bild- oder Videodatei verarbeiten
 
 ```bash
-uv run emit-o-vision-forth --width 140 --camera 1
+# Bilddatei im Terminal als ASCII anzeigen
+uv run emit-o-vision-forth --input mein_foto.jpg --width 120
+
+# Videodatei im Terminal abspielen
+uv run emit-o-vision-forth --input mein_video.mp4 --width 100
 ```
 
-### Python-Prototyp (farbig, ohne Forth)
+#### ASCII-Ausgabe in eine Textdatei exportieren
+
+```bash
+uv run emit-o-vision-forth --input mein_foto.png --width 140 --output ascii_art.txt
+```
+
+#### CLI-Optionen
+
+| Option | Beschreibung | Standard |
+| --- | --- | --- |
+| `-i`, `--input` | Pfad zu einer Bild- oder Videodatei | Kamera |
+| `-c`, `--camera` | Kamera-Index | `0` |
+| `-w`, `--width` | Bildbreite in Zeichen | `100` |
+| `--height` | Bildhöhe in Zeichen (optional) | Automatisch (Faktor 0.55) |
+| `-o`, `--output` | Ziel-Textdatei (`.txt`) für ASCII-Export | Terminal |
+| `--fps` | Bildrate manuell begrenzen | Quell-FPS |
+| `--gforth` | Benutzerdefinierter Pfad zu `gforth.exe` | Automatisch |
+
+---
+
+### 3. Ursprünglicher Prototyp (rein Python, farbig)
 
 ```bash
 uv run emit-o-vision
 ```
-
-Hier stellst du Breite (`terminal_width`) und Kamera-Index noch direkt im Quellcode ein.
-
-Beide Varianten beendest du mit `Strg + C`.
 
 ---
 
@@ -95,22 +132,28 @@ Beide Varianten beendest du mit `Strg + C`.
 EMIT-O-VISION/
 ├── src/
 │   └── emit_o_vision/
-│       ├── __init__.py        # Paketdatei
-│       ├── bridge.py          # Python-Zwischenskript: Webcam → Graustufen-Bytes → Gforth
+│       ├── __init__.py        # Paketdatei und Haupteinstiegspunkt
+│       ├── gui.py             # PySide6 Vollbild-Studio-GUI
+│       ├── bridge.py          # CLI-Runner für Kamera, Bild- und Videoverarbeitung
+│       ├── sources.py         # Frame-Quellen (Webcam, Video, Bild, Drag & Drop)
+│       ├── renderer.py        # Bidirektionale Prozess- und Streaming-Bridge zu Gforth
 │       ├── emit_o_vision.fs   # Forth-Renderer: Graustufen-Bytes → ASCII per EMIT
-│       └── webcam_ascii.py    # Python-Prototyp: Webcam → farbige ASCII-Ausgabe
+│       └── webcam_ascii.py    # Ursprünglicher farbiger Python-Prototyp
+├── docs/
+│   └── ideas/
+│       └── emit-o-vision-studio.md  # Konzeptionsdokument
 ├── .gitignore
 ├── .python-version            # Python-Version für uv
 ├── pyproject.toml             # Projekt-Metadaten, Abhängigkeiten und Startbefehle
 ├── uv.lock                    # Festgeschriebene Abhängigkeitsversionen
-└── README.md
+└── README.md                  # Dokumentation
 ```
 
 ---
 
 ## Helligkeitsskala anpassen
 
-Die Zeichen für die Helligkeitsstufen stehen in [`emit_o_vision.fs`](src/emit_o_vision/emit_o_vision.fs). Die Skala darf beliebig lang sein, weil sich die Zuordnung nach ihrer Länge richtet:
+Die Helligkeitsstufen sind in [`emit_o_vision.fs`](src/emit_o_vision/emit_o_vision.fs) definiert:
 
 ```forth
 \ Brightness ramp from dark to bright (first character is a space)
@@ -119,16 +162,6 @@ Die Zeichen für die Helligkeitsstufen stehen in [`emit_o_vision.fs`](src/emit_o
 \ Maps a gray value 0..255 onto a character of the brightness ramp
 : lum>char ( u8 -- char )  charset rot * 256 / + c@ ;
 ```
-
-Auf einem hellen Terminal-Hintergrund drehst du die Reihenfolge der Zeichen einfach um.
-
----
-
-## Tipps für eine gute Darstellung
-
-- **Kleinere Schrift:** Je kleiner die Schrift im Terminal, desto größer kann `--width` sein und desto feiner wird das Bild.
-- **Seitenverhältnis:** Terminalzeichen sind etwa doppelt so hoch wie breit. Beide Varianten gleichen das aus, indem sie die Höhe mit dem Faktor `0.55` multiplizieren.
-- **Fenstergröße:** Ist das Terminal kleiner als das Bild, bricht die Ausgabe um und das Bild verrutscht. Dann das Fenster vergrößern oder `--width` verkleinern.
 
 ---
 
