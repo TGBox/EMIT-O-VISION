@@ -1,9 +1,12 @@
 """PySide6 Fullscreen GUI for EMIT-O-VISION.
 
 Features:
-- Starts in fullscreen mode by default, with easy toggle to windowed mode (Button, F11, Esc).
+- Starts in fullscreen mode by default, maximizing available screen area,
+  with easy toggle to windowed mode (Button, F11, Esc).
+- ASCII output is centered horizontally and vertically in the app window.
+- Dynamically scales the frame resolution to utilize maximum available screen space
+  while preserving media aspect ratio.
 - Compact top header bar with action buttons and live status information.
-- Monospace ASCII stage filling the remaining screen area.
 - Real-time rendering driven by the Forth backend (Gforth).
 - Webcam feed toggle, file import dialog (image/video), and Drag & Drop file support.
 - Playback controls: Pause/Resume, Speed (Normal/Max), Font Size (+/-), Snapshot export (.txt).
@@ -13,11 +16,12 @@ Features:
 from __future__ import annotations
 
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import QObject, QPoint, QRect, Qt, QThread, QTimer, Signal
+from PySide6.QtCore import QObject, QRect, Qt, QThread, Signal
 from PySide6.QtGui import (
     QColor,
     QDragEnterEvent,
@@ -39,7 +43,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from emit_o_vision.renderer import ForthRenderer, find_gforth
+from emit_o_vision.renderer import ForthRenderer
 from emit_o_vision.sources import (
     BaseSource,
     ImageSource,
@@ -50,18 +54,16 @@ from emit_o_vision.sources import (
     open_media_file,
 )
 
-WELCOME_BANNER = """
-   ========================================================================
-                      E M I T - O - V I S I O N
-               ASCII-Video-Engine angetrieben durch Forth
-   ========================================================================
+WELCOME_BANNER = """========================================================================
+                   E M I T - O - V I S I O N
+            ASCII-Video-Engine angetrieben durch Forth
+========================================================================
 
-   Bereit zum Start!
-   - Klicke oben auf [Kamera starten], um den Live-Webcamfeed zu aktivieren.
-   - Klicke auf [Datei laden...] oder ziehe ein Bild/Video direkt hierher.
-   - Vollbild umschalten mit [F11] oder [Esc] zum Verlassen.
-   - Schriftgroesse mit [A -] und [A +] anpassen (aendert die Aufloesung).
-"""
+Bereit zum Start!
+- Klicke oben auf [Kamera starten], um den Live-Webcamfeed zu aktivieren.
+- Klicke auf [Datei laden...] oder ziehe ein Bild/Video direkt hierher.
+- Vollbild umschalten mit [F11] oder [Esc] zum Verlassen.
+- Schriftgroesse mit [A -] und [A +] anpassen."""
 
 
 class RenderWorker(QObject):
@@ -79,13 +81,22 @@ class RenderWorker(QObject):
         self._running = False
         self._paused = False
         self._max_speed = False
-        self._target_cols = 100
-        self._target_rows = 40
+
+        self._canvas_w = 1280
+        self._canvas_h = 720
+        self._char_w = 8
+        self._char_h = 16
+        self._metrics_lock = threading.Lock()
+
         self._camera_index = 0
 
-    def set_target_resolution(self, cols: int, rows: int) -> None:
-        self._target_cols = max(10, cols)
-        self._target_rows = max(5, rows)
+    def set_canvas_metrics(self, canvas_w: int, canvas_h: int, char_w: int, char_h: int) -> None:
+        """Update available canvas area and font character dimensions."""
+        with self._metrics_lock:
+            self._canvas_w = max(100, canvas_w)
+            self._canvas_h = max(50, canvas_h)
+            self._char_w = max(1, char_w)
+            self._char_h = max(1, char_h)
 
     def set_source(self, source: Optional[BaseSource]) -> None:
         if self._source is not None:
@@ -146,8 +157,30 @@ class RenderWorker(QObject):
                 time.sleep(0.02)
                 continue
 
-            cols = self._target_cols
-            rows = self._target_rows
+            frame_h, frame_w = frame.shape[:2]
+            with self._metrics_lock:
+                cw = self._canvas_w
+                ch = self._canvas_h
+                char_w = self._char_w
+                char_h = self._char_h
+
+            # Maximize available screen space while preserving image aspect ratio
+            max_cols = max(10, cw // char_w)
+            max_rows = max(5, ch // char_h)
+            aspect = frame_w / max(1, frame_h)
+
+            # Fit to width first
+            cols = max_cols
+            rows = round(cols * (char_w / char_h) / aspect)
+
+            # If height exceeds available canvas, fit to height instead
+            if rows > max_rows:
+                rows = max_rows
+                cols = round(rows * aspect * (char_h / char_w))
+                cols = min(cols, max_cols)
+
+            cols = max(10, cols)
+            rows = max(5, rows)
 
             success = self._renderer.send_frame(frame, width=cols, height=rows)
             if not success:
@@ -165,7 +198,7 @@ class RenderWorker(QObject):
 
                 self.frame_rendered.emit(rendered, current_fps, cols, rows)
 
-            # Image only needs to render once unless resized
+            # Image only needs periodic updates
             if isinstance(self._source, ImageSource):
                 time.sleep(0.05)
                 continue
@@ -191,11 +224,11 @@ class RenderWorker(QObject):
 
 
 class AsciiCanvas(QWidget):
-    """Monospace canvas widget that renders ASCII text and calculates grid dimensions."""
+    """Monospace canvas widget that renders ASCII text centered and calculates grid dimensions."""
 
-    resolution_changed = Signal(int, int)  # cols, rows
+    metrics_changed = Signal(int, int, int, int)  # canvas_w, canvas_h, char_w, char_h
 
-    def __init__(self, font_size: int = 11, parent: Optional[QWidget] = None) -> None:
+    def __init__(self, font_size: int = 10, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self.setAcceptDrops(True)
         self._font_size = font_size
@@ -211,9 +244,9 @@ class AsciiCanvas(QWidget):
         return self._font_size
 
     def set_font_size(self, size: int) -> None:
-        self._font_size = max(6, min(48, size))
+        self._font_size = max(5, min(48, size))
         self._font.setPointSize(self._font_size)
-        self._update_grid_resolution()
+        self._update_metrics()
         self.update()
 
     def increase_font(self) -> None:
@@ -231,15 +264,13 @@ class AsciiCanvas(QWidget):
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
-        self._update_grid_resolution()
+        self._update_metrics()
 
-    def _update_grid_resolution(self) -> None:
+    def _update_metrics(self) -> None:
         fm = QFontMetrics(self._font)
         char_w = max(1, fm.horizontalAdvance("X"))
         char_h = max(1, fm.lineSpacing())
-        cols = max(10, self.width() // char_w)
-        rows = max(5, self.height() // char_h)
-        self.resolution_changed.emit(cols, rows)
+        self.metrics_changed.emit(self.width(), self.height(), char_w, char_h)
 
     def paintEvent(self, event) -> None:
         painter = QPainter(self)
@@ -247,10 +278,27 @@ class AsciiCanvas(QWidget):
         painter.setPen(self._text_color)
         painter.setFont(self._font)
 
-        # Draw text left-aligned, top-aligned within canvas margins
-        margin = 4
-        target_rect = self.rect().adjusted(margin, margin, -margin, -margin)
-        painter.drawText(target_rect, Qt.AlignLeft | Qt.AlignTop, self._text)
+        fm = QFontMetrics(self._font)
+        char_w = max(1, fm.horizontalAdvance("X"))
+        char_h = max(1, fm.lineSpacing())
+
+        lines = self._text.split("\n")
+        num_lines = len(lines)
+        max_cols = max((len(l) for l in lines), default=0)
+
+        # Calculate pixel dimensions of the text block
+        block_w = max_cols * char_w
+        block_h = num_lines * char_h
+
+        # Center horizontally and vertically within the canvas
+        start_x = max(0, (self.width() - block_w) // 2)
+        start_y = max(0, (self.height() - block_h) // 2)
+
+        # Render line by line
+        y = start_y + fm.ascent()
+        for line in lines:
+            painter.drawText(start_x, y, line)
+            y += char_h
 
 
 class MainWindow(QMainWindow):
@@ -337,7 +385,7 @@ class MainWindow(QMainWindow):
         self.btn_snapshot.clicked.connect(self._on_save_snapshot)
         header_layout.addWidget(self.btn_snapshot)
 
-        self.btn_fullscreen = QPushButton("Fenstermodus")
+        self.btn_fullscreen = QPushButton("Fenstermodus [F11]")
         self.btn_fullscreen.setToolTip("Vollbild umschalten (F11)")
         self.btn_fullscreen.clicked.connect(self.toggle_fullscreen)
         header_layout.addWidget(self.btn_fullscreen)
@@ -372,7 +420,7 @@ class MainWindow(QMainWindow):
         self.worker = RenderWorker(gforth_path=gforth_path)
         self.worker.moveToThread(self.worker_thread)
 
-        self.canvas.resolution_changed.connect(self.worker.set_target_resolution)
+        self.canvas.metrics_changed.connect(self.worker.set_canvas_metrics, Qt.DirectConnection)
         self.worker.frame_rendered.connect(self._on_frame_rendered)
         self.worker.status_changed.connect(self._on_worker_status)
         self.worker.error_occurred.connect(self._on_worker_error)
@@ -384,6 +432,11 @@ class MainWindow(QMainWindow):
         # Start directly in Fullscreen mode (as requested by user)
         self.showFullScreen()
         self._update_fullscreen_button_text()
+        self.canvas._update_metrics()
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        self.canvas._update_metrics()
 
     def toggle_fullscreen(self) -> None:
         """Toggle between Fullscreen and Windowed mode."""
@@ -392,6 +445,7 @@ class MainWindow(QMainWindow):
         else:
             self.showFullScreen()
         self._update_fullscreen_button_text()
+        self.canvas._update_metrics()
 
     def _update_fullscreen_button_text(self) -> None:
         if self.isFullScreen():
@@ -406,6 +460,7 @@ class MainWindow(QMainWindow):
         elif event.key() == Qt.Key_Escape and self.isFullScreen():
             self.showNormal()
             self._update_fullscreen_button_text()
+            self.canvas._update_metrics()
             event.accept()
         elif event.key() == Qt.Key_Space:
             self._on_toggle_pause()
@@ -531,11 +586,8 @@ def main() -> int:
     app.setApplicationName("EMIT-O-VISION")
 
     window = MainWindow()
-    # Already opened in fullscreen mode within __init__
-
     return app.exec()
 
 
 if __name__ == "__main__":
     sys.exit(main())
-
