@@ -1,7 +1,7 @@
 [project]
 name = "emit-o-vision"
 version = "0.2.0"
-description = """A Python and Forth project, that uses Python as an intermediate step, to read out the webcam live feed, convert it to a reasonable resolution and hand it over to Forth. Using Forth we now decode the incoming Image Feed and render an ASCII representation of the parsed data stream into the terminal."""
+description = "A Python and Forth project, that uses Python as an intermediate step, to read out the webcam live feed, convert it to a reasonable resolution and hand it over to Forth. Using Forth we now decode the incoming Image Feed and render an ASCII representation of the parsed data stream into the terminal."
 readme = "README.md"
 authors = [
     { name = "Daniel Rösch", email = "droesch91@gmail.com" }
