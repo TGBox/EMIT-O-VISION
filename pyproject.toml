@@ -1,0 +1,19 @@
+[project]
+name = "emit-o-vision"
+version = "0.1.0"
+description = "A Python and Forth project, that uses Python as an intermediate step, to read out the webcam live feed, convert it to a reasonable resolution and hand it over to Forth. Using Forth we now decode the incoming Image Feed and render an ASCII representation of the parsed data stream into the terminal."
+readme = "README.md"
+authors = [
+    { name = "Daniel Rösch", email = "droesch91@gmail.com" }
+]
+requires-python = ">=3.14"
+dependencies = [
+    "opencv-python>=5.0.0.93",
+]
+
+[project.scripts]
+emit-o-vision = "emit_o_vision:main"
+
+[build-system]
+requires = ["uv_build>=0.12.6,<0.13.0"]
+build-backend = "uv_build"

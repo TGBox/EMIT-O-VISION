@@ -1,0 +1,79 @@
+# ==========================================
+# Python
+# ==========================================
+
+# Bytecode / Cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C-Erweiterungen
+*.so
+*.pyd
+
+# Build / Packaging
+build/
+dist/
+*.egg-info/
+.eggs/
+wheels/
+
+# Virtuelle Umgebungen
+.venv/
+venv/
+env/
+ENV/
+
+# Umgebungsvariablen
+.env
+
+# Test / Coverage / Linter
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# ==========================================
+# Forth (Gforth)
+# ==========================================
+
+# Gespeicherte Images / Kompilate
+*.fi
+*.img
+
+# Gforth-Historie
+.gforth-history
+
+# ==========================================
+# Projektspezifisch
+# ==========================================
+
+# Temporäre Frame-Dateien / Named Pipes der Python-Bridge
+*.frame
+*.raw
+*.fifo
+
+# Logs
+*.log
+
+# ==========================================
+# Editoren / IDEs
+# ==========================================
+
+.vscode/
+.idea/
+*.swp
+*~
+
+# ==========================================
+# Betriebssystem
+# ==========================================
+
+.DS_Store
+Thumbs.db
+desktop.ini
+
