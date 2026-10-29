@@ -179,8 +179,8 @@ create cb W H * allot
 
 : project-pt ( wx wy -- valid? )
   py - swap px - swap
-  over pa icos * over pa isin * + 16 arshift to sdist
-  pa icos * swap pa isin * - 16 arshift
+  over pa icos * over pa isin * + 65536 / to sdist
+  pa icos * swap pa isin * - 65536 /
   sdist 6 400 within 0= if drop false exit then
   60 * sdist / 40 + to scol
   768 sdist / 16 min 1 max to sph  true ;
