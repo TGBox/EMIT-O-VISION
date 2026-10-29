@@ -6,9 +6,9 @@ Features:
 - ASCII output is centered horizontally and vertically in the app window.
 - Dynamically scales the frame resolution to utilize maximum available screen space
   while preserving media aspect ratio.
-- Compact top header bar with action buttons and live status information.
+- Compact top header bar with action buttons, camera selector dropdown, and live status information.
 - Real-time rendering driven by the Forth backend (Gforth).
-- Webcam feed toggle, file import dialog (image/video), and Drag & Drop file support.
+- Webcam feed toggle, camera device selection, file import dialog (image/video), and Drag & Drop file support.
 - Playback controls: Pause/Resume, Speed (Normal/Max), Font Size (+/-), Snapshot export (.txt).
 - All user-visible labels in German, variable names and comments in English.
 """
@@ -33,6 +33,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import (
     QApplication,
+    QComboBox,
     QFileDialog,
     QHBoxLayout,
     QLabel,
@@ -60,7 +61,7 @@ WELCOME_BANNER = """============================================================
 ========================================================================
 
 Bereit zum Start!
-- Klicke oben auf [Kamera starten], um den Live-Webcamfeed zu aktivieren.
+- Waehle deine Kamera im Dropdown-Menue und klicke [Kamera starten].
 - Klicke auf [Datei laden...] oder ziehe ein Bild/Video direkt hierher.
 - Vollbild umschalten mit [F11] oder [Esc] zum Verlassen.
 - Schriftgroesse mit [A -] und [A +] anpassen."""
@@ -89,6 +90,19 @@ class RenderWorker(QObject):
         self._metrics_lock = threading.Lock()
 
         self._camera_index = 0
+
+    def set_camera_index(self, index: int) -> None:
+        self._camera_index = index
+
+    def switch_camera(self, index: int) -> bool:
+        """Switch active camera to a new index while running."""
+        self._camera_index = index
+        src = WebcamSource(camera_index=index)
+        if not src.is_opened:
+            self.error_occurred.emit(f"Konnte Kamera mit Index {index} nicht oeffnen.")
+            return False
+        self.set_source(src)
+        return True
 
     def set_canvas_metrics(self, canvas_w: int, canvas_h: int, char_w: int, char_h: int) -> None:
         """Update available canvas area and font character dimensions."""
@@ -343,6 +357,23 @@ class MainWindow(QMainWindow):
             QPushButton:pressed {
                 background-color: #1f1f2e;
             }
+            QComboBox {
+                background-color: #2b2b3d;
+                color: #ffffff;
+                border: 1px solid #41415a;
+                border-radius: 4px;
+                padding: 4px 8px;
+                font-size: 12px;
+                min-width: 170px;
+            }
+            QComboBox:hover {
+                border-color: #606085;
+            }
+            QComboBox QAbstractItemView {
+                background-color: #1a1a24;
+                color: #ffffff;
+                selection-background-color: #3d3d56;
+            }
             QLabel {
                 font-size: 12px;
                 color: #a0a0b8;
@@ -357,6 +388,13 @@ class MainWindow(QMainWindow):
         self.btn_webcam = QPushButton("Kamera starten")
         self.btn_webcam.clicked.connect(self._on_toggle_webcam)
         header_layout.addWidget(self.btn_webcam)
+
+        # Camera selector dropdown
+        self.combo_camera = QComboBox(self)
+        self.combo_camera.setToolTip("Kameraquelle auswaehlen")
+        self._populate_cameras()
+        self.combo_camera.currentIndexChanged.connect(self._on_camera_changed)
+        header_layout.addWidget(self.combo_camera)
 
         self.btn_file = QPushButton("Datei laden...")
         self.btn_file.clicked.connect(self._on_open_file)
@@ -427,12 +465,45 @@ class MainWindow(QMainWindow):
         self.worker_thread.started.connect(self.worker.start_loop)
         self.file_dropped.connect(self._on_file_dropped)
 
+        # Sync initial selected camera
+        initial_cam = self.combo_camera.currentData()
+        if initial_cam is not None:
+            self.worker.set_camera_index(int(initial_cam))
+
         self.worker_thread.start()
 
         # Start directly in Fullscreen mode (as requested by user)
         self.showFullScreen()
         self._update_fullscreen_button_text()
         self.canvas._update_metrics()
+
+    def _populate_cameras(self) -> None:
+        """Scan and populate available video input devices in combo box."""
+        self.combo_camera.clear()
+        found_indices = set()
+        try:
+            from PySide6.QtMultimedia import QMediaDevices
+            qt_devs = QMediaDevices.videoInputs()
+            for i, dev in enumerate(qt_devs):
+                name = dev.description() or f"Kamera {i}"
+                self.combo_camera.addItem(f"{i}: {name}", i)
+                found_indices.add(i)
+        except Exception:
+            pass
+
+        # Also provide fallback choices for Camera 0, 1, 2 if not listed
+        for idx in (0, 1, 2):
+            if idx not in found_indices:
+                self.combo_camera.addItem(f"Kamera {idx}", idx)
+
+    def _on_camera_changed(self, index: int) -> None:
+        cam_idx = self.combo_camera.currentData()
+        if cam_idx is not None:
+            selected_index = int(cam_idx)
+            self.worker.set_camera_index(selected_index)
+            # If camera is currently actively running, switch immediately
+            if isinstance(self.worker._source, WebcamSource):
+                self.worker.switch_camera(selected_index)
 
     def showEvent(self, event) -> None:
         super().showEvent(event)

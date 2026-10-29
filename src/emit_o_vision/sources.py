@@ -59,7 +59,11 @@ class WebcamSource(BaseSource):
     def __init__(self, camera_index: int = 0) -> None:
         super().__init__(name=f"Webcam (Kamera {camera_index})", is_live=True, fps=30.0)
         self.camera_index = camera_index
-        self._cap = cv2.VideoCapture(camera_index)
+        # Try DirectShow first on Windows (best for virtual/phone cameras), then default backend
+        self._cap = cv2.VideoCapture(camera_index, cv2.CAP_DSHOW)
+        if not self._cap.isOpened():
+            self._cap = cv2.VideoCapture(camera_index)
+
         if self._cap.isOpened():
             detected_fps = self._cap.get(cv2.CAP_PROP_FPS)
             if detected_fps and 1.0 <= detected_fps <= 120.0:
@@ -165,4 +169,3 @@ def open_media_file(path: str | Path, loop_video: bool = True) -> BaseSource | N
         src = VideoSource(p, loop=loop_video)
         return src if src.is_opened else None
     return None
-
