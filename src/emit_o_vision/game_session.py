@@ -66,7 +66,7 @@ class Wolf3DSession:
             [self.gforth_path, self.script_path.name],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
             cwd=self.script_path.parent,
             bufsize=0,
             creationflags=flags,

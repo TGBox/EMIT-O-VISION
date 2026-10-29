@@ -24,7 +24,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import QObject, QRect, Qt, QThread, Signal
+from PySide6.QtCore import QEvent, QObject, QRect, Qt, QThread, Signal
 from PySide6.QtGui import (
     QColor,
     QDragEnterEvent,
@@ -32,6 +32,7 @@ from PySide6.QtGui import (
     QFont,
     QFontMetrics,
     QKeyEvent,
+    QMouseEvent,
     QPainter,
 )
 from PySide6.QtWidgets import (
@@ -312,6 +313,10 @@ class AsciiCanvas(QWidget):
         # Return cleaned text without ANSI codes for snapshots
         return re.sub(r"\x1b\[[0-9;]*[a-zA-Z]", "", self._text)
 
+    def mousePressEvent(self, event: QMouseEvent) -> None:
+        self.setFocus()
+        super().mousePressEvent(event)
+
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
         self._update_metrics()
@@ -535,6 +540,23 @@ class MainWindow(QMainWindow):
         self.btn_quit.clicked.connect(self.close)
         header_layout.addWidget(self.btn_quit)
 
+        # Header buttons shouldn't steal keyboard focus from the game / canvas
+        for btn in (
+            self.btn_webcam,
+            self.btn_wolf3d,
+            self.btn_file,
+            self.btn_pause,
+            self.btn_speed,
+            self.btn_font_dec,
+            self.btn_font_inc,
+            self.btn_snapshot,
+            self.btn_fullscreen,
+            self.btn_quit,
+        ):
+            btn.setFocusPolicy(Qt.NoFocus)
+
+        self.combo_camera.setFocusPolicy(Qt.ClickFocus)
+
         main_layout.addWidget(header)
 
         # --- ASCII Monospace Canvas ---
@@ -561,9 +583,16 @@ class MainWindow(QMainWindow):
 
         self.worker_thread.start()
 
+        # Install application event filter so game controls and global shortcuts
+        # work reliably regardless of which widget currently has focus
+        app_inst = QApplication.instance()
+        if app_inst:
+            app_inst.installEventFilter(self)
+
         # Start directly in Fullscreen mode (as requested by user)
         self.showFullScreen()
         self._update_fullscreen_button_text()
+        self.canvas.setFocus()
         self.canvas._update_metrics()
 
     def _populate_cameras(self) -> None:
@@ -625,7 +654,8 @@ class MainWindow(QMainWindow):
                     background-color: #632d36;
                 }
             """)
-            self.lbl_status.setText("Wolf3D aktiv | [WASD] Bewegen, [F] Feuer, [Leertaste] Tuer, [R] Neu, [Q] Ende")
+            self.lbl_status.setText("Wolf3D aktiv | [WASD / Pfeile] Bewegen, [F / Enter] Feuer, [Leertaste] Tuer, [R] Neu, [Q] Ende")
+            self.canvas.setFocus()
         except Exception as e:
             QMessageBox.critical(self, "Wolf3D Fehler", f"Konnte Wolf3D nicht starten:\n{e}")
             self.worker.resume()
@@ -647,6 +677,7 @@ class MainWindow(QMainWindow):
         """)
         self.worker.resume()
         self.canvas.set_ascii_text(WELCOME_BANNER)
+        self.canvas.setFocus()
         self.lbl_status.setText("Bereit")
 
     def _on_game_frame(self, frame_text: str) -> None:
@@ -675,46 +706,45 @@ class MainWindow(QMainWindow):
         else:
             self.btn_fullscreen.setText("Vollbild [F11]")
 
-    def keyPressEvent(self, event: QKeyEvent) -> None:
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:
+        if event.type() == QEvent.KeyPress and isinstance(event, QKeyEvent):
+            if self._handle_key_press(event, watched=watched):
+                return True
+        return super().eventFilter(watched, event)
+
+    def _handle_key_press(self, event: QKeyEvent, watched: Optional[QObject] = None) -> bool:
         # Route keys to Wolf3D game if active
         if self._game_session and self._game_session.is_running:
             key = event.key()
-            if key in (Qt.Key_W, Qt.Key_Up):
+            text = event.text().lower()
+
+            if key in (Qt.Key_W, Qt.Key_Up) or text == "w":
                 self._game_session.send_key("w")
-                event.accept()
-                return
-            elif key in (Qt.Key_S, Qt.Key_Down):
+                return True
+            elif key in (Qt.Key_S, Qt.Key_Down) or text == "s":
                 self._game_session.send_key("s")
-                event.accept()
-                return
-            elif key in (Qt.Key_A, Qt.Key_Left):
+                return True
+            elif key in (Qt.Key_A, Qt.Key_Left) or text == "a":
                 self._game_session.send_key("a")
-                event.accept()
-                return
-            elif key in (Qt.Key_D, Qt.Key_Right):
+                return True
+            elif key in (Qt.Key_D, Qt.Key_Right) or text == "d":
                 self._game_session.send_key("d")
-                event.accept()
-                return
-            elif key in (Qt.Key_F, Qt.Key_Return):
+                return True
+            elif key in (Qt.Key_F, Qt.Key_Return, Qt.Key_Enter) or text == "f":
                 self._game_session.send_key("f")
-                event.accept()
-                return
-            elif key == Qt.Key_Space:
+                return True
+            elif key == Qt.Key_Space or text == " ":
                 self._game_session.send_key(" ")
-                event.accept()
-                return
-            elif key == Qt.Key_R:
+                return True
+            elif key == Qt.Key_R or text == "r":
                 self._game_session.send_key("r")
-                event.accept()
-                return
-            elif key == Qt.Key_Q:
+                return True
+            elif key == Qt.Key_Q or text == "q":
                 self._stop_wolf3d()
-                event.accept()
-                return
+                return True
             elif key == Qt.Key_F11:
                 self.toggle_fullscreen()
-                event.accept()
-                return
+                return True
             elif key == Qt.Key_Escape:
                 if self.isFullScreen():
                     self.showNormal()
@@ -722,20 +752,28 @@ class MainWindow(QMainWindow):
                     self.canvas._update_metrics()
                 else:
                     self._stop_wolf3d()
-                event.accept()
-                return
+                return True
+            # Consume other keys while in game to prevent toolbar navigation or button clicks
+            return True
 
-        # Normal key bindings
+        # Normal key bindings when game is not active
         if event.key() == Qt.Key_F11:
             self.toggle_fullscreen()
-            event.accept()
+            return True
         elif event.key() == Qt.Key_Escape and self.isFullScreen():
             self.showNormal()
             self._update_fullscreen_button_text()
             self.canvas._update_metrics()
-            event.accept()
+            return True
         elif event.key() == Qt.Key_Space:
-            self._on_toggle_pause()
+            if not isinstance(watched, QComboBox):
+                self._on_toggle_pause()
+                return True
+
+        return False
+
+    def keyPressEvent(self, event: QKeyEvent) -> None:
+        if self._handle_key_press(event):
             event.accept()
         else:
             super().keyPressEvent(event)
@@ -860,6 +898,12 @@ class MainWindow(QMainWindow):
         QMessageBox.critical(self, "EMIT-O-VISION Fehler", err_msg)
 
     def closeEvent(self, event) -> None:
+        try:
+            app_inst = QApplication.instance()
+            if app_inst:
+                app_inst.removeEventFilter(self)
+        except Exception:
+            pass
         if self._game_session:
             self._game_session.stop()
             self._game_session = None
