@@ -4,17 +4,20 @@ Features:
 - Starts in fullscreen mode by default, maximizing available screen area,
   with easy toggle to windowed mode (Button, F11, Esc).
 - ASCII output is centered horizontally and vertically in the app window.
+- Supports full ANSI color rendering (e.g. for the 3D Wolfenstein engine).
 - Dynamically scales the frame resolution to utilize maximum available screen space
   while preserving media aspect ratio.
 - Compact top header bar with action buttons, camera selector dropdown, and live status information.
 - Real-time rendering driven by the Forth backend (Gforth).
 - Webcam feed toggle, camera device selection, file import dialog (image/video), and Drag & Drop file support.
+- Built-in 3D Wolfenstein-style raycasting game powered by Forth (src/game/wolf3d.fs).
 - Playback controls: Pause/Resume, Speed (Normal/Max), Font Size (+/-), Snapshot export (.txt).
 - All user-visible labels in German, variable names and comments in English.
 """
 
 from __future__ import annotations
 
+import re
 import sys
 import threading
 import time
@@ -44,6 +47,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from emit_o_vision.game_session import Wolf3DSession
 from emit_o_vision.renderer import ForthRenderer
 from emit_o_vision.sources import (
     BaseSource,
@@ -62,9 +66,30 @@ WELCOME_BANNER = """============================================================
 
 Bereit zum Start!
 - Waehle deine Kamera im Dropdown-Menue und klicke [Kamera starten].
+- Klicke auf [Wolf3D Spiel], um den 3D-Retro-Shooter in Forth zu starten.
 - Klicke auf [Datei laden...] oder ziehe ein Bild/Video direkt hierher.
 - Vollbild umschalten mit [F11] oder [Esc] zum Verlassen.
 - Schriftgroesse mit [A -] und [A +] anpassen."""
+
+ANSI_COLOR_MAP: dict[int, QColor] = {
+    0: QColor(220, 225, 230),   # Reset / Default
+    30: QColor(0, 0, 0),        # Black
+    31: QColor(205, 49, 49),    # Red
+    32: QColor(13, 188, 121),   # Green
+    33: QColor(229, 229, 16),   # Yellow
+    34: QColor(36, 114, 200),   # Blue
+    35: QColor(188, 63, 188),   # Magenta
+    36: QColor(17, 168, 205),   # Cyan
+    37: QColor(229, 229, 229),  # White
+    90: QColor(102, 102, 102),  # Bright Black / Gray
+    91: QColor(241, 76, 76),    # Bright Red
+    92: QColor(35, 209, 139),   # Bright Green
+    93: QColor(245, 245, 67),   # Bright Yellow
+    94: QColor(59, 142, 234),   # Bright Blue
+    95: QColor(214, 112, 214),  # Bright Magenta
+    96: QColor(41, 184, 219),   # Bright Cyan
+    97: QColor(255, 255, 255),  # Bright White
+}
 
 
 class RenderWorker(QObject):
@@ -133,6 +158,16 @@ class RenderWorker(QObject):
         self.set_source(src)
         return True
 
+    def pause(self) -> None:
+        self._paused = True
+        if self._source:
+            self._source.pause()
+
+    def resume(self) -> None:
+        self._paused = False
+        if self._source:
+            self._source.resume()
+
     def toggle_pause(self) -> bool:
         if self._source is not None:
             self._paused = self._source.toggle_pause()
@@ -159,7 +194,7 @@ class RenderWorker(QObject):
         while self._running:
             loop_start = time.perf_counter()
 
-            if self._source is None or self._source.is_paused:
+            if self._paused or self._source is None or self._source.is_paused:
                 time.sleep(0.05)
                 continue
 
@@ -274,7 +309,8 @@ class AsciiCanvas(QWidget):
         self.update()
 
     def get_ascii_text(self) -> str:
-        return self._text
+        # Return cleaned text without ANSI codes for snapshots
+        return re.sub(r"\x1b\[[0-9;]*[a-zA-Z]", "", self._text)
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
@@ -289,7 +325,6 @@ class AsciiCanvas(QWidget):
     def paintEvent(self, event) -> None:
         painter = QPainter(self)
         painter.fillRect(self.rect(), self._bg_color)
-        painter.setPen(self._text_color)
         painter.setFont(self._font)
 
         fm = QFontMetrics(self._font)
@@ -298,7 +333,15 @@ class AsciiCanvas(QWidget):
 
         lines = self._text.split("\n")
         num_lines = len(lines)
-        max_cols = max((len(l) for l in lines), default=0)
+
+        # Calculate max visible columns stripping ANSI escape sequences
+        max_cols = 0
+        clean_lines = []
+        for line in lines:
+            clean = re.sub(r"\x1b\[[0-9;]*[a-zA-Z]", "", line)
+            clean_lines.append(clean)
+            if len(clean) > max_cols:
+                max_cols = len(clean)
 
         # Calculate pixel dimensions of the text block
         block_w = max_cols * char_w
@@ -308,21 +351,51 @@ class AsciiCanvas(QWidget):
         start_x = max(0, (self.width() - block_w) // 2)
         start_y = max(0, (self.height() - block_h) // 2)
 
-        # Render line by line
+        # Render line by line, supporting ANSI colors
         y = start_y + fm.ascent()
-        for line in lines:
-            painter.drawText(start_x, y, line)
+        for raw_line, clean_line in zip(lines, clean_lines):
+            if "\x1b[" not in raw_line:
+                painter.setPen(self._text_color)
+                painter.drawText(start_x, y, clean_line)
+            else:
+                # Parse ANSI color chunks
+                cur_x = start_x
+                cur_color = self._text_color
+                parts = re.split(r"(\x1b\[[0-9;]*[a-zA-Z])", raw_line)
+                for part in parts:
+                    if not part:
+                        continue
+                    if part.startswith("\x1b[") and part.endswith("m"):
+                        # Extract color code
+                        code_str = part[2:-1]
+                        try:
+                            code = int(code_str) if code_str else 0
+                            cur_color = ANSI_COLOR_MAP.get(code, self._text_color)
+                        except ValueError:
+                            pass
+                    elif part.startswith("\x1b["):
+                        # Ignore other ANSI control sequences
+                        continue
+                    else:
+                        painter.setPen(cur_color)
+                        painter.drawText(cur_x, y, part)
+                        cur_x += len(part) * char_w
+
             y += char_h
 
 
 class MainWindow(QMainWindow):
-    """Main application window with header toolbar and fullscreen support."""
+    """Main application window with header toolbar, camera selection, and Wolf3D support."""
 
     file_dropped = Signal(str)
+    game_frame_received = Signal(str)
 
     def __init__(self, gforth_path: Optional[str] = None) -> None:
         super().__init__()
-        self.setWindowTitle("EMIT-O-VISION Studio (Forth ASCII Video)")
+        self.gforth_path = gforth_path
+        self._game_session: Optional[Wolf3DSession] = None
+
+        self.setWindowTitle("EMIT-O-VISION Studio (Forth ASCII Video & 3D Game)")
         self.resize(1280, 800)
 
         # Central container
@@ -396,6 +469,21 @@ class MainWindow(QMainWindow):
         self.combo_camera.currentIndexChanged.connect(self._on_camera_changed)
         header_layout.addWidget(self.combo_camera)
 
+        # Wolf3D game button
+        self.btn_wolf3d = QPushButton("Wolf3D Spiel")
+        self.btn_wolf3d.setToolTip("3D Wolfenstein Raycaster starten (reines Forth)")
+        self.btn_wolf3d.setStyleSheet("""
+            QPushButton {
+                background-color: #243d2b;
+                border-color: #35583f;
+            }
+            QPushButton:hover {
+                background-color: #31533b;
+            }
+        """)
+        self.btn_wolf3d.clicked.connect(self._on_toggle_wolf3d)
+        header_layout.addWidget(self.btn_wolf3d)
+
         self.btn_file = QPushButton("Datei laden...")
         self.btn_file.clicked.connect(self._on_open_file)
         header_layout.addWidget(self.btn_file)
@@ -464,6 +552,7 @@ class MainWindow(QMainWindow):
         self.worker.error_occurred.connect(self._on_worker_error)
         self.worker_thread.started.connect(self.worker.start_loop)
         self.file_dropped.connect(self._on_file_dropped)
+        self.game_frame_received.connect(self._on_game_frame)
 
         # Sync initial selected camera
         initial_cam = self.combo_camera.currentData()
@@ -505,6 +594,68 @@ class MainWindow(QMainWindow):
             if isinstance(self.worker._source, WebcamSource):
                 self.worker.switch_camera(selected_index)
 
+    def _on_toggle_wolf3d(self) -> None:
+        """Toggle Wolf3D Forth game."""
+        if self._game_session and self._game_session.is_running:
+            self._stop_wolf3d()
+        else:
+            self._start_wolf3d()
+
+    def _start_wolf3d(self) -> None:
+        # Stop webcam / video if active
+        if isinstance(self.worker._source, WebcamSource):
+            self.worker.set_source(None)
+            self.btn_webcam.setText("Kamera starten")
+        self.worker.pause()
+
+        try:
+            self._game_session = Wolf3DSession(
+                on_frame=lambda frame: self.game_frame_received.emit(frame),
+                on_exit=lambda: self.game_frame_received.emit(""),
+                gforth_path=self.gforth_path,
+            )
+            self._game_session.start()
+            self.btn_wolf3d.setText("Spiel beenden")
+            self.btn_wolf3d.setStyleSheet("""
+                QPushButton {
+                    background-color: #4a2228;
+                    border-color: #6d333b;
+                }
+                QPushButton:hover {
+                    background-color: #632d36;
+                }
+            """)
+            self.lbl_status.setText("Wolf3D aktiv | [WASD] Bewegen, [F] Feuer, [Leertaste] Tuer, [R] Neu, [Q] Ende")
+        except Exception as e:
+            QMessageBox.critical(self, "Wolf3D Fehler", f"Konnte Wolf3D nicht starten:\n{e}")
+            self.worker.resume()
+
+    def _stop_wolf3d(self) -> None:
+        if self._game_session:
+            self._game_session.stop()
+            self._game_session = None
+
+        self.btn_wolf3d.setText("Wolf3D Spiel")
+        self.btn_wolf3d.setStyleSheet("""
+            QPushButton {
+                background-color: #243d2b;
+                border-color: #35583f;
+            }
+            QPushButton:hover {
+                background-color: #31533b;
+            }
+        """)
+        self.worker.resume()
+        self.canvas.set_ascii_text(WELCOME_BANNER)
+        self.lbl_status.setText("Bereit")
+
+    def _on_game_frame(self, frame_text: str) -> None:
+        if frame_text:
+            self.canvas.set_ascii_text(frame_text)
+        elif self._game_session:
+            # Game ended by process exit
+            self._stop_wolf3d()
+
     def showEvent(self, event) -> None:
         super().showEvent(event)
         self.canvas._update_metrics()
@@ -525,6 +676,56 @@ class MainWindow(QMainWindow):
             self.btn_fullscreen.setText("Vollbild [F11]")
 
     def keyPressEvent(self, event: QKeyEvent) -> None:
+        # Route keys to Wolf3D game if active
+        if self._game_session and self._game_session.is_running:
+            key = event.key()
+            if key in (Qt.Key_W, Qt.Key_Up):
+                self._game_session.send_key("w")
+                event.accept()
+                return
+            elif key in (Qt.Key_S, Qt.Key_Down):
+                self._game_session.send_key("s")
+                event.accept()
+                return
+            elif key in (Qt.Key_A, Qt.Key_Left):
+                self._game_session.send_key("a")
+                event.accept()
+                return
+            elif key in (Qt.Key_D, Qt.Key_Right):
+                self._game_session.send_key("d")
+                event.accept()
+                return
+            elif key in (Qt.Key_F, Qt.Key_Return):
+                self._game_session.send_key("f")
+                event.accept()
+                return
+            elif key == Qt.Key_Space:
+                self._game_session.send_key(" ")
+                event.accept()
+                return
+            elif key == Qt.Key_R:
+                self._game_session.send_key("r")
+                event.accept()
+                return
+            elif key == Qt.Key_Q:
+                self._stop_wolf3d()
+                event.accept()
+                return
+            elif key == Qt.Key_F11:
+                self.toggle_fullscreen()
+                event.accept()
+                return
+            elif key == Qt.Key_Escape:
+                if self.isFullScreen():
+                    self.showNormal()
+                    self._update_fullscreen_button_text()
+                    self.canvas._update_metrics()
+                else:
+                    self._stop_wolf3d()
+                event.accept()
+                return
+
+        # Normal key bindings
         if event.key() == Qt.Key_F11:
             self.toggle_fullscreen()
             event.accept()
@@ -561,6 +762,9 @@ class MainWindow(QMainWindow):
         self._load_file(file_path)
 
     def _on_toggle_webcam(self) -> None:
+        if self._game_session and self._game_session.is_running:
+            self._stop_wolf3d()
+
         active = self.worker.toggle_webcam()
         if active:
             self.btn_webcam.setText("Kamera stoppen")
@@ -569,6 +773,9 @@ class MainWindow(QMainWindow):
             self.canvas.set_ascii_text(WELCOME_BANNER)
 
     def _on_open_file(self) -> None:
+        if self._game_session and self._game_session.is_running:
+            self._stop_wolf3d()
+
         file_path, _ = QFileDialog.getOpenFileName(
             self,
             "Bild- oder Videodatei oeffnen",
@@ -579,6 +786,9 @@ class MainWindow(QMainWindow):
             self._load_file(file_path)
 
     def _load_file(self, file_path: str) -> None:
+        if self._game_session and self._game_session.is_running:
+            self._stop_wolf3d()
+
         source = open_media_file(file_path, loop_video=True)
         if not source:
             QMessageBox.warning(
@@ -636,16 +846,23 @@ class MainWindow(QMainWindow):
                 )
 
     def _on_frame_rendered(self, text: str, fps: float, cols: int, rows: int) -> None:
+        if self._game_session and self._game_session.is_running:
+            return
         self.canvas.set_ascii_text(text)
         self.lbl_status.setText(f"Aufloesung: {cols}x{rows} | {fps:.1f} FPS")
 
     def _on_worker_status(self, msg: str) -> None:
+        if self._game_session and self._game_session.is_running:
+            return
         self.lbl_status.setText(msg)
 
     def _on_worker_error(self, err_msg: str) -> None:
         QMessageBox.critical(self, "EMIT-O-VISION Fehler", err_msg)
 
     def closeEvent(self, event) -> None:
+        if self._game_session:
+            self._game_session.stop()
+            self._game_session = None
         self.worker.stop()
         self.worker_thread.quit()
         self.worker_thread.wait(1500)
