@@ -95,6 +95,10 @@ Bereit zum Start!
 - Vollbild umschalten mit [F11] oder [Esc] zum Verlassen.
 - Schriftgroesse mit [A -] und [A +] anpassen."""
 
+ANSI_ESC_RE = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z]")
+ANSI_SPLIT_RE = re.compile(r"(\x1b\[[0-9;?]*[a-zA-Z])")
+
+
 ANSI_COLOR_MAP: dict[int, QColor] = {
     0: QColor(220, 225, 230),   # Reset / Default
     30: QColor(0, 0, 0),        # Black
@@ -307,6 +311,8 @@ class AsciiCanvas(QWidget):
         self._font_size = font_size
         self._font = QFont("Consolas", self._font_size)
         self._font.setStyleHint(QFont.Monospace)
+        self._font.setFixedPitch(True)
+        self._font.setKerning(False)
         self._text: str = WELCOME_BANNER
         self._bg_color = QColor(10, 10, 14)
         self._text_color = QColor(220, 225, 230)
@@ -334,7 +340,7 @@ class AsciiCanvas(QWidget):
 
     def get_ascii_text(self) -> str:
         # Return cleaned text without ANSI codes for snapshots
-        return re.sub(r"\x1b\[[0-9;]*[a-zA-Z]", "", self._text)
+        return ANSI_ESC_RE.sub("", self._text).replace("\r", "")
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
         self.setFocus()
@@ -359,17 +365,12 @@ class AsciiCanvas(QWidget):
         char_w = max(1, fm.horizontalAdvance("X"))
         char_h = max(1, fm.lineSpacing())
 
-        lines = self._text.split("\n")
+        lines = self._text.replace("\r", "").split("\n")
         num_lines = len(lines)
 
         # Calculate max visible columns stripping ANSI escape sequences
-        max_cols = 0
-        clean_lines = []
-        for line in lines:
-            clean = re.sub(r"\x1b\[[0-9;]*[a-zA-Z]", "", line)
-            clean_lines.append(clean)
-            if len(clean) > max_cols:
-                max_cols = len(clean)
+        clean_lines = [ANSI_ESC_RE.sub("", line) for line in lines]
+        max_cols = max((len(c) for c in clean_lines), default=0)
 
         # Calculate pixel dimensions of the text block
         block_w = max_cols * char_w
@@ -379,35 +380,33 @@ class AsciiCanvas(QWidget):
         start_x = max(0, (self.width() - block_w) // 2)
         start_y = max(0, (self.height() - block_h) // 2)
 
-        # Render line by line, supporting ANSI colors
+        # Render line by line, supporting ANSI colors.
+        # Wichtig: Die Farbe gilt wie in einem echten Terminal ueber Zeilengrenzen
+        # hinweg (Forth sendet Farbcodes nur bei Farbwechsel).
+        cur_color = self._text_color
         y = start_y + fm.ascent()
         for raw_line, clean_line in zip(lines, clean_lines):
             if "\x1b[" not in raw_line:
-                painter.setPen(self._text_color)
+                painter.setPen(cur_color)
                 painter.drawText(start_x, y, clean_line)
             else:
-                # Parse ANSI color chunks
                 cur_x = start_x
-                cur_color = self._text_color
-                parts = re.split(r"(\x1b\[[0-9;]*[a-zA-Z])", raw_line)
-                for part in parts:
+                for part in ANSI_SPLIT_RE.split(raw_line):
                     if not part:
                         continue
-                    if part.startswith("\x1b[") and part.endswith("m"):
-                        # Extract color code
-                        code_str = part[2:-1]
-                        try:
-                            code = int(code_str) if code_str else 0
-                            cur_color = ANSI_COLOR_MAP.get(code, self._text_color)
-                        except ValueError:
-                            pass
-                    elif part.startswith("\x1b["):
-                        # Ignore other ANSI control sequences
+                    if part.startswith("\x1b["):
+                        if part.endswith("m"):
+                            code_str = part[2:-1]
+                            try:
+                                code = int(code_str.split(";")[-1]) if code_str else 0
+                                cur_color = ANSI_COLOR_MAP.get(code, self._text_color)
+                            except ValueError:
+                                pass
+                        # Alle anderen Steuersequenzen ignorieren
                         continue
-                    else:
-                        painter.setPen(cur_color)
-                        painter.drawText(cur_x, y, part)
-                        cur_x += len(part) * char_w
+                    painter.setPen(cur_color)
+                    painter.drawText(cur_x, y, part)
+                    cur_x += len(part) * char_w
 
             y += char_h
 

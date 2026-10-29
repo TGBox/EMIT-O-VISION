@@ -49,7 +49,7 @@ create world 256 allot
 : solid?   ( mx my -- flag ) tile@ 1 4 within ; \ 1-3 fest, 4 t.offen, 5 schatz
 
 \ --- 3. Prozeduraler Dungeon- & Schatz-Generator ---
-: clear-world ( -- )  16 0 do 16 0 do 0 i j tile! loop loop ;
+: clear-world ( -- )  16 0 do 16 0 do 1 i j tile! loop loop ;
 : carve-east  ( x y -- x y ) over 13 < if 2dup swap 1+ swap 0 -rot tile! then ;
 : carve-south ( x y -- x y ) dup  13 < if 2dup 1+ 0 -rot tile! then ;
 : carve-dir   ( x y -- x y ) over 13 = if carve-south exit then
@@ -159,7 +159,9 @@ create fb W H * allot
 create cb W H * allot
 97 value pen
 
-: plot  ( c col row -- ) W * +  pen over cb + c!  fb + c! ;
+: plot  ( c col row -- )
+  2dup H u< swap W u< and 0= if 2drop drop exit then
+  W * +  pen over cb + c!  fb + c! ;
 : row-v ( row -- v )     12 wh - - 8 * wh / 15 and ;
 
 : draw-pixel ( col row -- )
@@ -173,34 +175,34 @@ create cb W H * allot
   H 0 do dup i draw-pixel loop drop ;
 
 \ --- 7. 3D-Projektion (Sprite, Schatzkisten, Feuerball) ---
-0 value sdist   0 value scol   0 value sh   0 value su
+0 value sdist   0 value scol   0 value sph   0 value su
 
 : project-pt ( wx wy -- valid? )
   py - swap px - swap
-  over pa icos * over pa isin * + 16 rshift to sdist
-  pa icos * swap pa isin * - 16 rshift
+  over pa icos * over pa isin * + 16 arshift to sdist
+  pa icos * swap pa isin * - 16 arshift
   sdist 6 400 within 0= if drop false exit then
   60 * sdist / 40 + to scol
-  768 sdist / 16 min 1 max to sh  true ;
+  768 sdist / 16 min 1 max to sph  true ;
 
 : sprite-char ( u v -- char )
   dup 5 > if swap anim xor swap then  7 and 3 lshift swap 7 and + sprite-bmp + c@ ;
 
 : draw-srow ( col row -- )
   dup 0 H within 0= if 2drop exit then
-  su over 12 sh - - 4 * sh / sprite-char
+  su over 12 sph - - 4 * sph / sprite-char
   dup [char] . = if drop 2drop exit then
   ehit if 93 else dup [char] O = over [char] ^ = or if 97 else 91 then then to pen  -rot plot ;
 
 : draw-scol ( col -- )
   dup 0 W within 0= if drop exit then
   dup cells zbuf + @ sdist < if drop exit then
-  dup scol sh - - 4 * sh / to su
-  12 sh + 12 sh - ?do dup i draw-srow loop drop ;
+  dup scol sph - - 4 * sph / to su
+  12 sph + 12 sph - ?do dup i draw-srow loop drop ;
 
 : draw-sprite ( -- )
   ex ey project-pt 0= if exit then
-  scol sh + scol sh - ?do i draw-scol loop ;
+  scol sph + scol sph - ?do i draw-scol loop ;
 
 \ 3D-Schatzkisten Renderer
 : draw-trow ( col row -- )
@@ -210,14 +212,14 @@ create cb W H * allot
 : draw-tcol ( col -- )
   dup 0 W within 0= if drop exit then
   dup cells zbuf + @ sdist < if drop exit then
-  12 sh + 12 sh - ?do dup i draw-trow loop drop ;
+  12 sph + 12 sph - ?do dup i draw-trow loop drop ;
 
 : draw-treasures ( -- )
   16 0 do 16 0 do
     i j tile@ 5 = if
       i TILE * TILE 2/ +  j TILE * TILE 2/ +  project-pt if
-        sh 2/ 1 max to sh
-        scol sh + scol sh - ?do i draw-tcol loop
+        sph 2/ 1 max to sph
+        scol sph + scol sph - ?do i draw-tcol loop
       then
     then
   loop loop ;
@@ -225,15 +227,15 @@ create cb W H * allot
 : draw-fcol ( col -- )
   dup 0 W within 0= if drop exit then
   dup cells zbuf + @ sdist < if drop exit then
-  12 sh + 12 sh - ?do
+  12 sph + 12 sph - ?do
     i 0 H within if i 12 = over scol = or if 97 else 93 then to pen [char] * over i plot then
   loop drop ;
 
 : draw-fireball ( -- )
   flife 0= if exit then
   fx fy project-pt 0= if exit then
-  sh 2/ 1 max to sh
-  scol sh + scol sh - ?do i draw-fcol loop ;
+  sph 2/ 1 max to sph
+  scol sph + scol sph - ?do i draw-fcol loop ;
 
 \ --- 8. HUD & Minimap ---
 0 value gx   0 value gy
