@@ -39,10 +39,12 @@ class Wolf3DSession:
         self,
         on_frame: Callable[[str], None],
         on_exit: Optional[Callable[[], None]] = None,
+        on_stats: Optional[Callable[[dict[str, int]], None]] = None,
         gforth_path: Optional[str] = None,
     ) -> None:
         self.on_frame = on_frame
         self.on_exit = on_exit
+        self.on_stats = on_stats
         self.gforth_path = find_gforth(gforth_path)
         self.script_path = get_wolf3d_script()
 
@@ -51,6 +53,12 @@ class Wolf3DSession:
         self._reader_thread: Optional[threading.Thread] = None
         self._stderr_thread: Optional[threading.Thread] = None
         self._frame_count = 0
+
+        self._last_px: Optional[int] = None
+        self._last_py: Optional[int] = None
+        self._last_pa: Optional[int] = None
+        self._last_k: Optional[int] = None
+        self._pending_move_check: Optional[dict] = None
 
     @property
     def is_running(self) -> bool:
@@ -136,6 +144,24 @@ class Wolf3DSession:
             while b"\x0c" in buf:
                 frame_bytes, buf = buf.split(b"\x0c", 1)
                 frame_text = frame_bytes.decode("latin1", errors="replace").strip("\r\n")
+
+                stats: Optional[dict[str, int]] = None
+                if "__W3D_STATS__" in frame_text:
+                    parts = frame_text.rsplit("__W3D_STATS__", 1)
+                    frame_text = parts[0].rstrip("\r\n")
+                    stats_str = parts[1].strip()
+                    try:
+                        stats = {}
+                        for token in stats_str.split():
+                            if "=" in token:
+                                k_name, val = token.split("=", 1)
+                                stats[k_name] = int(val)
+                    except Exception:
+                        pass
+
+                if stats:
+                    self._process_stats(stats)
+
                 if frame_text and self.on_frame:
                     self._frame_count += 1
                     if self._frame_count == 1:
@@ -149,6 +175,68 @@ class Wolf3DSession:
         if self.on_exit:
             self.on_exit()
 
+    def _process_stats(self, stats: dict[str, int]) -> None:
+        px = stats.get("px")
+        py = stats.get("py")
+        pa = stats.get("pa")
+
+        if px is None or py is None or pa is None:
+            return
+
+        tx = px >> 14
+        ty = py >> 14
+        deg = (pa * 360.0) / 64.0
+
+        if self._last_px is None:
+            logger.info(
+                f"[Wolf3D Telemetrie] Start-Position: Tile ({tx}, {ty}) "
+                f"[Subpixel: px={px}, py={py}], Blickwinkel: A={pa} ({deg:.1f}°)"
+            )
+        else:
+            dx = px - self._last_px
+            dy = py - self._last_py
+
+            if dx != 0 or dy != 0:
+                old_tx = self._last_px >> 14
+                old_ty = self._last_py >> 14
+                if (tx != old_tx) or (ty != old_ty):
+                    logger.info(
+                        f"[Wolf3D Bewegung] Position geaendert: Tile ({old_tx}, {old_ty}) -> ({tx}, {ty}) "
+                        f"[px={px}, py={py}] (Delta: dx={dx:+d}, dy={dy:+d})"
+                    )
+                else:
+                    logger.info(
+                        f"[Wolf3D Teilschritt] Subpixel-Bewegung: px={px}, py={py} in Tile ({tx}, {ty}) "
+                        f"(Delta: dx={dx:+d}, dy={dy:+d})"
+                    )
+                self._pending_move_check = None
+            elif self._pending_move_check is not None:
+                self._pending_move_check["frames_remaining"] -= 1
+                if self._pending_move_check["frames_remaining"] <= 0:
+                    cmd = self._pending_move_check["char"]
+                    direction = "VORWAERTS" if cmd == "w" else "RUECKWAERTS"
+                    logger.warning(
+                        f"[Wolf3D Kollision] Bewegung '{cmd}' ({direction}) blockiert bei Tile ({tx}, {ty}) "
+                        f"[px={px}, py={py}] (Wand voraus)"
+                    )
+                    self._pending_move_check = None
+
+            if pa != self._last_pa:
+                logger.info(
+                    f"[Wolf3D Drehung] Blickwinkel geaendert: A={self._last_pa} -> A={pa} ({deg:.1f}°)"
+                )
+
+        self._last_px = px
+        self._last_py = py
+        self._last_pa = pa
+        self._last_k = stats.get("k")
+
+        if self.on_stats:
+            try:
+                self.on_stats(stats)
+            except Exception:
+                pass
+
     def send_key(self, char: str) -> None:
         """Send a single key command into Gforth's stdin."""
         if not self.is_running or self._proc is None or self._proc.stdin is None:
@@ -157,6 +245,13 @@ class Wolf3DSession:
         try:
             raw_bytes = char.encode("ascii", errors="ignore")
             logger.debug(f"[Wolf3D Input] Sende Taste: {char!r} (Bytes: {raw_bytes!r}) an Gforth Stdin")
+            if char in ("w", "s") and self._last_px is not None and self._last_py is not None:
+                self._pending_move_check = {
+                    "char": char,
+                    "px": self._last_px,
+                    "py": self._last_py,
+                    "frames_remaining": 4,
+                }
             self._proc.stdin.write(raw_bytes)
             self._proc.stdin.flush()
         except (BrokenPipeError, OSError) as e:

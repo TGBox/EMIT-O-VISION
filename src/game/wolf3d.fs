@@ -277,7 +277,8 @@ create cb W H * allot
   ."  Pos:(" px 14 rshift 0 .r [char] , emit py 14 rshift 0 .r [char] ) emit
   ."  A:" pa 0 .r
   last-k if ."  Taste:" last-k emit then
-  ."   "
+  cr
+  ." __W3D_STATS__ px=" px 0 .r ."  py=" py 0 .r ."  pa=" pa 0 .r ."  k=" last-k 0 .r
   12 emit stdout flush-file drop ;
 
 : render ( -- )

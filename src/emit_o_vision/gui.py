@@ -512,6 +512,7 @@ class MainWindow(QMainWindow):
 
     file_dropped = Signal(str)
     game_frame_received = Signal(str)
+    game_stats_received = Signal(dict)
 
     def __init__(self, gforth_path: Optional[str] = None) -> None:
         super().__init__()
@@ -709,6 +710,7 @@ class MainWindow(QMainWindow):
         self.worker_thread.started.connect(self.worker.start_loop)
         self.file_dropped.connect(self._on_file_dropped)
         self.game_frame_received.connect(self._on_game_frame)
+        self.game_stats_received.connect(self._on_game_stats)
 
         # Sync initial selected camera
         initial_cam = self.combo_camera.currentData()
@@ -793,6 +795,7 @@ class MainWindow(QMainWindow):
             self._game_session = Wolf3DSession(
                 on_frame=lambda frame: self.game_frame_received.emit(frame),
                 on_exit=lambda: self.game_frame_received.emit(""),
+                on_stats=lambda stats: self.game_stats_received.emit(stats),
                 gforth_path=self.gforth_path,
             )
             self._game_session.start()
@@ -841,6 +844,21 @@ class MainWindow(QMainWindow):
         elif self._game_session:
             # Game ended by process exit
             self._stop_wolf3d()
+
+    def _on_game_stats(self, stats: dict) -> None:
+        px = stats.get("px")
+        py = stats.get("py")
+        pa = stats.get("pa")
+        k = stats.get("k")
+        if px is not None and py is not None and pa is not None:
+            tx = px >> 14
+            ty = py >> 14
+            deg = (pa * 360.0) / 64.0
+            k_char = chr(k) if k and 32 <= k <= 126 else (str(k) if k else "-")
+            self.lbl_status.setText(
+                f"Wolf3D aktiv | Pos: Tile ({tx}, {ty}) [px={px}, py={py}] | "
+                f"Winkel: {pa} ({deg:.1f}°) | Letzte Taste: {k_char!r}"
+            )
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
