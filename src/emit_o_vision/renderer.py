@@ -10,6 +10,7 @@ import queue
 import shutil
 import struct
 import subprocess
+import sys
 import threading
 from pathlib import Path
 from typing import Optional
@@ -17,7 +18,28 @@ from typing import Optional
 import cv2
 import numpy as np
 
-FORTH_SCRIPT = Path(__file__).with_name("emit_o_vision.fs")
+
+def get_base_dir() -> Path:
+    """Return base directory, supporting PyInstaller bundled environment."""
+    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+        return Path(sys._MEIPASS)
+    return Path(__file__).resolve().parent
+
+
+def get_forth_script() -> Path:
+    """Locate emit_o_vision.fs in source tree or packaged bundle."""
+    base = get_base_dir()
+    for candidate in (
+        base / "emit_o_vision.fs",
+        base / "emit_o_vision" / "emit_o_vision.fs",
+        Path(__file__).with_name("emit_o_vision.fs"),
+    ):
+        if candidate.is_file():
+            return candidate
+    return Path(__file__).with_name("emit_o_vision.fs")
+
+
+FORTH_SCRIPT = get_forth_script()
 
 GFORTH_FALLBACKS = (
     Path(r"C:\Program Files (x86)\gforth\gforth.exe"),
@@ -26,12 +48,28 @@ GFORTH_FALLBACKS = (
 
 
 def find_gforth(explicit: Optional[str] = None) -> Optional[str]:
-    """Find the Gforth executable in explicit arg, PATH, or standard installation dirs."""
+    """Find the Gforth executable in explicit arg, bundled directory, PATH, or standard installation dirs."""
     if explicit:
         return explicit
+
+    # 1. Check bundled Gforth (for PyInstaller standalone builds)
+    base = get_base_dir()
+    bundled = base / "gforth" / "gforth.exe"
+    if bundled.is_file():
+        return str(bundled)
+
+    if getattr(sys, "frozen", False):
+        exe_dir = Path(sys.executable).resolve().parent
+        bundled_exe = exe_dir / "gforth" / "gforth.exe"
+        if bundled_exe.is_file():
+            return str(bundled_exe)
+
+    # 2. Check PATH
     found = shutil.which("gforth")
     if found:
         return found
+
+    # 3. Check standard Windows locations
     for candidate in GFORTH_FALLBACKS:
         if candidate.is_file():
             return str(candidate)
@@ -49,16 +87,22 @@ class ForthRenderer:
             )
         self.gforth_path = path
 
-        if not FORTH_SCRIPT.is_file():
-            raise FileNotFoundError(f"Forth-Skript nicht gefunden: {FORTH_SCRIPT}")
+        forth_script = get_forth_script()
+        if not forth_script.is_file():
+            raise FileNotFoundError(f"Forth-Skript nicht gefunden: {forth_script}")
+
+        flags = 0
+        if sys.platform == "win32":
+            flags = subprocess.CREATE_NO_WINDOW
 
         self._proc: Optional[subprocess.Popen] = subprocess.Popen(
-            [self.gforth_path, FORTH_SCRIPT.name],
+            [self.gforth_path, forth_script.name],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            cwd=FORTH_SCRIPT.parent,
+            cwd=forth_script.parent,
             bufsize=0,
+            creationflags=flags,
         )
 
         self._frame_queue: queue.Queue[str] = queue.Queue(maxsize=4)

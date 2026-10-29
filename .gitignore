@@ -17,6 +17,7 @@ dist/
 *.egg-info/
 .eggs/
 wheels/
+*.spec
 
 # Virtuelle Umgebungen
 .venv/
