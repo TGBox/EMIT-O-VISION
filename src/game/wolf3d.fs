@@ -46,7 +46,7 @@ create world 256 allot
 : map-addr ( mx my -- addr ) 15 and 4 lshift swap 15 and + world + ;
 : tile@    ( mx my -- id )   map-addr c@ ;
 : tile!    ( id mx my -- )   map-addr c! ;
-: solid?   ( mx my -- flag ) tile@ dup 1 4 within ; \ 1-3 fest, 4 t.offen, 5 schatz
+: solid?   ( mx my -- flag ) tile@ 1 4 within ; \ 1-3 fest, 4 t.offen, 5 schatz
 
 \ --- 3. Prozeduraler Dungeon- & Schatz-Generator ---
 : clear-world ( -- )  16 0 do 16 0 do 0 i j tile! loop loop ;
@@ -65,7 +65,7 @@ create world 256 allot
   2dup tile@ 1 = if 3 choose 0= if 2 -rot tile! else 2drop then exit then
   2dup + 1 and 0= if 2drop exit then
   2dup choke? if
-    4 choose 0= if 3 -rot tile! else 6 choose 0= if 5 2 -rot tile! else 2drop then then
+    4 choose 0= if 3 -rot tile! else 6 choose 0= if 5 -rot tile! else 2drop then then
   else 2drop then ;
 
 \ --- 4. Spiel-Zustand, Gegner & Schatz-Kollektion ---
@@ -264,6 +264,7 @@ create cb W H * allot
 
 \ --- 9. Loop & Renderer ---
 0 value last-c
+0 value last-k
 : ansi-fg ( color -- ) dup last-c = if drop exit then dup to last-c 27 emit [char] [ emit 0 .r [char] m emit ;
 
 : show-row ( row -- ) W * dup W + swap do cb i + c@ ansi-fg fb i + c@ emit loop cr ;
@@ -271,8 +272,12 @@ create cb W H * allot
   0 to last-c  0 0 at-xy
   H 0 do i show-row loop
   97 ansi-fg
-  ." [WASD] Lauf [F] Feuer [SPACE] Tuer [R] Neu [Q] Ende | "
-  ." HP:" ehp . ." Kills:" kills . ." Score:" score . ."   "
+  ." [WASD] [F]Feuer [SP]Tuer [R]Neu [Q]End | HP:" ehp 0 .r
+  ."  Kills:" kills 0 .r
+  ."  Pos:(" px 14 rshift 0 .r [char] , emit py 14 rshift 0 .r [char] ) emit
+  ."  A:" pa 0 .r
+  last-k if ."  Taste:" last-k emit then
+  ."   "
   12 emit stdout flush-file drop ;
 
 : render ( -- )
@@ -280,6 +285,7 @@ create cb W H * allot
   draw-treasures draw-sprite draw-fireball draw-gun draw-minimap show-fb ;
 
 : handle-key ( char -- exit? )
+  dup to last-k
   32 or case
     [char] w of pa icos  12 * pa isin  12 * try-move false endof
     [char] s of pa icos -12 * pa isin -12 * try-move false endof

@@ -17,6 +17,8 @@ Features:
 
 from __future__ import annotations
 
+import argparse
+import logging
 import re
 import sys
 import threading
@@ -37,19 +39,40 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import (
     QApplication,
+    QCheckBox,
     QComboBox,
+    QDialog,
     QFileDialog,
     QHBoxLayout,
     QLabel,
     QMainWindow,
     QMessageBox,
+    QPlainTextEdit,
     QPushButton,
     QVBoxLayout,
     QWidget,
 )
 
 from emit_o_vision.game_session import Wolf3DSession
+from emit_o_vision.logger import (
+    clear_log_history,
+    get_log_file_path,
+    get_log_history,
+    open_log_file,
+    register_log_listener,
+    setup_logging,
+)
 from emit_o_vision.renderer import ForthRenderer
+
+logger = logging.getLogger("emit_o_vision.gui")
+
+
+class LogSignalBridge(QObject):
+    log_received = Signal(str)
+
+
+log_bridge = LogSignalBridge()
+register_log_listener(lambda line: log_bridge.log_received.emit(line))
 from emit_o_vision.sources import (
     BaseSource,
     ImageSource,
@@ -389,6 +412,101 @@ class AsciiCanvas(QWidget):
             y += char_h
 
 
+class LogViewerDialog(QDialog):
+    """Floating live diagnostic log viewer window."""
+
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("EMIT-O-VISION - Diagnose & Live-Logbuch")
+        self.resize(850, 520)
+        self.setStyleSheet("""
+            QDialog {
+                background-color: #16161e;
+                color: #c0caf5;
+            }
+            QPlainTextEdit {
+                background-color: #0f0f14;
+                color: #7aa2f7;
+                font-family: Consolas, monospace;
+                font-size: 11px;
+                border: 1px solid #2e2e3e;
+                border-radius: 4px;
+                padding: 6px;
+            }
+            QPushButton {
+                background-color: #24283b;
+                color: #ffffff;
+                border: 1px solid #414868;
+                border-radius: 4px;
+                padding: 5px 12px;
+                font-size: 12px;
+            }
+            QPushButton:hover {
+                background-color: #3b4261;
+            }
+            QLabel {
+                color: #9aa5ce;
+                font-size: 11px;
+            }
+            QCheckBox {
+                color: #c0caf5;
+                font-size: 12px;
+            }
+        """)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(8)
+
+        # Log text area
+        self.txt_log = QPlainTextEdit(self)
+        self.txt_log.setReadOnly(True)
+        layout.addWidget(self.txt_log, stretch=1)
+
+        # Bottom toolbar
+        bottom_bar = QHBoxLayout()
+        bottom_bar.setSpacing(8)
+
+        self.chk_autoscroll = QCheckBox("Automatisch scrollen", self)
+        self.chk_autoscroll.setChecked(True)
+        bottom_bar.addWidget(self.chk_autoscroll)
+
+        bottom_bar.addStretch(1)
+
+        self.btn_open_file = QPushButton("Log-Datei öffnen", self)
+        self.btn_open_file.clicked.connect(open_log_file)
+        bottom_bar.addWidget(self.btn_open_file)
+
+        self.btn_clear = QPushButton("Log leeren", self)
+        self.btn_clear.clicked.connect(self._clear_logs)
+        bottom_bar.addWidget(self.btn_clear)
+
+        layout.addLayout(bottom_bar)
+
+        # Status line with file path
+        self.lbl_path = QLabel(f"Logdatei: {get_log_file_path()}", self)
+        layout.addWidget(self.lbl_path)
+
+        # Load existing history
+        for line in get_log_history():
+            self.txt_log.appendPlainText(line)
+        self._scroll_to_bottom()
+
+    def append_log_line(self, line: str) -> None:
+        self.txt_log.appendPlainText(line)
+        if self.chk_autoscroll.isChecked():
+            self._scroll_to_bottom()
+
+    def _scroll_to_bottom(self) -> None:
+        sb = self.txt_log.verticalScrollBar()
+        if sb:
+            sb.setValue(sb.maximum())
+
+    def _clear_logs(self) -> None:
+        clear_log_history()
+        self.txt_log.clear()
+
+
 class MainWindow(QMainWindow):
     """Main application window with header toolbar, camera selection, and Wolf3D support."""
 
@@ -399,6 +517,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.gforth_path = gforth_path
         self._game_session: Optional[Wolf3DSession] = None
+        self._log_viewer: Optional[LogViewerDialog] = None
 
         self.setWindowTitle("EMIT-O-VISION Studio (Forth ASCII Video & 3D Game)")
         self.resize(1280, 800)
@@ -540,6 +659,20 @@ class MainWindow(QMainWindow):
         self.btn_quit.clicked.connect(self.close)
         header_layout.addWidget(self.btn_quit)
 
+        self.btn_log = QPushButton("Logbuch [F12]")
+        self.btn_log.setToolTip("Echtzeit-Logbuch & Diagnosefenster öffnen (F12)")
+        self.btn_log.setStyleSheet("""
+            QPushButton {
+                background-color: #2e3440;
+                border-color: #4c566a;
+            }
+            QPushButton:hover {
+                background-color: #3b4252;
+            }
+        """)
+        self.btn_log.clicked.connect(self._on_toggle_log_viewer)
+        header_layout.addWidget(self.btn_log)
+
         # Header buttons shouldn't steal keyboard focus from the game / canvas
         for btn in (
             self.btn_webcam,
@@ -552,6 +685,7 @@ class MainWindow(QMainWindow):
             self.btn_snapshot,
             self.btn_fullscreen,
             self.btn_quit,
+            self.btn_log,
         ):
             btn.setFocusPolicy(Qt.NoFocus)
 
@@ -595,6 +729,23 @@ class MainWindow(QMainWindow):
         self.canvas.setFocus()
         self.canvas._update_metrics()
 
+        log_bridge.log_received.connect(self._on_log_line_received)
+
+    def _on_toggle_log_viewer(self) -> None:
+        """Toggle floating log viewer dialog."""
+        if self._log_viewer is None:
+            self._log_viewer = LogViewerDialog(self)
+        if self._log_viewer.isVisible():
+            self._log_viewer.hide()
+        else:
+            self._log_viewer.show()
+            self._log_viewer.raise_()
+            self._log_viewer.activateWindow()
+
+    def _on_log_line_received(self, line: str) -> None:
+        if self._log_viewer is not None:
+            self._log_viewer.append_log_line(line)
+
     def _populate_cameras(self) -> None:
         """Scan and populate available video input devices in combo box."""
         self.combo_camera.clear()
@@ -631,6 +782,7 @@ class MainWindow(QMainWindow):
             self._start_wolf3d()
 
     def _start_wolf3d(self) -> None:
+        logger.info("Starte Wolf3D-Spielmodus...")
         # Stop webcam / video if active
         if isinstance(self.worker._source, WebcamSource):
             self.worker.set_source(None)
@@ -656,11 +808,14 @@ class MainWindow(QMainWindow):
             """)
             self.lbl_status.setText("Wolf3D aktiv | [WASD / Pfeile] Bewegen, [F / Enter] Feuer, [Leertaste] Tuer, [R] Neu, [Q] Ende")
             self.canvas.setFocus()
+            logger.info("Wolf3D-Spiel erfolgreich gestartet. Tastaturfokus auf Canvas gesetzt.")
         except Exception as e:
+            logger.error(f"Fehler beim Starten von Wolf3D: {e}", exc_info=True)
             QMessageBox.critical(self, "Wolf3D Fehler", f"Konnte Wolf3D nicht starten:\n{e}")
             self.worker.resume()
 
     def _stop_wolf3d(self) -> None:
+        logger.info("Beende Wolf3D-Spielmodus...")
         if self._game_session:
             self._game_session.stop()
             self._game_session = None
@@ -713,33 +868,51 @@ class MainWindow(QMainWindow):
         return super().eventFilter(watched, event)
 
     def _handle_key_press(self, event: QKeyEvent, watched: Optional[QObject] = None) -> bool:
-        # Route keys to Wolf3D game if active
-        if self._game_session and self._game_session.is_running:
-            key = event.key()
-            text = event.text().lower()
+        key = event.key()
+        text = event.text()
+        text_lower = text.lower()
+        in_game = bool(self._game_session and self._game_session.is_running)
+        watched_name = type(watched).__name__ if watched else "None"
 
-            if key in (Qt.Key_W, Qt.Key_Up) or text == "w":
+        logger.debug(f"[Tastatur] key={key} (hex={hex(key)}) text={text!r} watched={watched_name} in_game={in_game}")
+
+        # Global toggle for log viewer (F12)
+        if key == Qt.Key_F12:
+            self._on_toggle_log_viewer()
+            return True
+
+        # Route keys to Wolf3D game if active
+        if in_game and self._game_session:
+            if key in (Qt.Key_W, Qt.Key_Up) or text_lower == "w":
+                logger.info("[Wolf3D] Befehl: VORWAERTS ('w')")
                 self._game_session.send_key("w")
                 return True
-            elif key in (Qt.Key_S, Qt.Key_Down) or text == "s":
+            elif key in (Qt.Key_S, Qt.Key_Down) or text_lower == "s":
+                logger.info("[Wolf3D] Befehl: RUECKWAERTS ('s')")
                 self._game_session.send_key("s")
                 return True
-            elif key in (Qt.Key_A, Qt.Key_Left) or text == "a":
+            elif key in (Qt.Key_A, Qt.Key_Left) or text_lower == "a":
+                logger.info("[Wolf3D] Befehl: DREHUNG LINKS ('a')")
                 self._game_session.send_key("a")
                 return True
-            elif key in (Qt.Key_D, Qt.Key_Right) or text == "d":
+            elif key in (Qt.Key_D, Qt.Key_Right) or text_lower == "d":
+                logger.info("[Wolf3D] Befehl: DREHUNG RECHTS ('d')")
                 self._game_session.send_key("d")
                 return True
-            elif key in (Qt.Key_F, Qt.Key_Return, Qt.Key_Enter) or text == "f":
+            elif key in (Qt.Key_F, Qt.Key_Return, Qt.Key_Enter) or text_lower == "f":
+                logger.info("[Wolf3D] Befehl: FEUER ('f')")
                 self._game_session.send_key("f")
                 return True
             elif key == Qt.Key_Space or text == " ":
+                logger.info("[Wolf3D] Befehl: TUER (' ')")
                 self._game_session.send_key(" ")
                 return True
-            elif key == Qt.Key_R or text == "r":
+            elif key == Qt.Key_R or text_lower == "r":
+                logger.info("[Wolf3D] Befehl: DUNGEON NEU ('r')")
                 self._game_session.send_key("r")
                 return True
-            elif key == Qt.Key_Q or text == "q":
+            elif key == Qt.Key_Q or text_lower == "q":
+                logger.info("[Wolf3D] Befehl: BEENDEN ('q')")
                 self._stop_wolf3d()
                 return True
             elif key == Qt.Key_F11:
@@ -914,10 +1087,17 @@ class MainWindow(QMainWindow):
 
 
 def main() -> int:
+    parser = argparse.ArgumentParser(description="EMIT-O-VISION ASCII Video Engine")
+    parser.add_argument("--debug", "--log", action="store_true", help="Ausfuehrliches Logging aktivieren")
+    parser.add_argument("--gforth", type=str, default=None, help="Expliziter Pfad zur Gforth-Executable")
+    args, _ = parser.parse_known_args()
+
+    setup_logging(debug=args.debug)
+
     app = QApplication(sys.argv)
     app.setApplicationName("EMIT-O-VISION")
 
-    window = MainWindow()
+    window = MainWindow(gforth_path=args.gforth)
     return app.exec()
 
 
